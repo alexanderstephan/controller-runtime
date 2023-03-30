@@ -77,10 +77,10 @@ type Server struct {
 	// TLSOpts is used to allow configuring the TLS config used for the server
 	TLSOpts []func(*tls.Config)
 
-	// WebhookMux is the multiplexer that handles different Webhooks.
+	// WebhookMux is the multiplexer that handles different webhooks.
 	WebhookMux *http.ServeMux
 
-	// Webhooks keep track of all registered Webhooks
+	// Webhooks keep track of all registered webhooks.
 	Webhooks map[string]*http.Handler
 
 	// defaultingOnce ensures that the default fields are only ever set once.
