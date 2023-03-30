@@ -24,6 +24,8 @@ import (
 	"net"
 	"net/http"
 
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -113,7 +115,7 @@ var _ = Describe("Webhook Server", func() {
 		Eventually(doneCh, "4s").Should(BeClosed())
 	})
 
-	Context("when registering new Webhooks before starting", func() {
+	Context("when registering new webhooks before starting", func() {
 		It("should serve a webhook on the requested path", func() {
 			server.Register("/somepath", &testHandler{})
 
@@ -135,7 +137,7 @@ var _ = Describe("Webhook Server", func() {
 		})
 	})
 
-	Context("when registering Webhooks after starting", func() {
+	Context("when registering webhooks after starting", func() {
 		var (
 			doneCh <-chan struct{}
 		)

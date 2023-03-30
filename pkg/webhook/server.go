@@ -166,7 +166,7 @@ func tlsVersion(version string) (uint16, error) {
 func (s *Server) Start(ctx context.Context) error {
 	s.defaultingOnce.Do(s.setDefaults)
 
-	baseHookLog := log.WithName("Webhooks")
+	baseHookLog := log.WithName("webhooks")
 	baseHookLog.Info("Starting webhook server")
 
 	certPath := filepath.Join(s.CertDir, s.CertName)
