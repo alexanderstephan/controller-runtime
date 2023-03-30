@@ -88,6 +88,15 @@ type Manager interface {
 	// GetWebhookServer returns a webhook.Server
 	GetWebhookServer() *webhook.Server
 
+	// GetMetricsHTTPHandler returns a http.Handler that serves metrics.
+	GetMetricsHTTPHandler() *http.Handler
+
+	// GetExtraMetricsHTTPHandler gets an extra http metrics handler registered for the given path.
+	GetExtraMetricsHTTPHandler(path string) *http.Handler
+
+	// GetWebhookHTTPHandler returns a http.Handler is responsible for web hooks.
+	GetWebhookHTTPHandler() *http.Handler
+
 	// GetLogger returns this manager's logger.
 	GetLogger() logr.Logger
 
@@ -449,7 +458,7 @@ func New(config *rest.Config, options Options) (Manager, error) {
 	}
 
 	// By default we have no extra endpoints to expose on metrics http server.
-	metricsExtraHandlers := make(map[string]http.Handler)
+	metricsExtraHandlers := make(map[string]*http.Handler)
 
 	// Create health probes listener. This will throw an error if the bind
 	// address is invalid or already in use.

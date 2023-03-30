@@ -88,7 +88,7 @@ type controllerManager struct {
 	metricsListener net.Listener
 
 	// metricsExtraHandlers contains extra handlers to register on http server that serves metrics.
-	metricsExtraHandlers map[string]http.Handler
+	metricsExtraHandlers map[string]*http.Handler
 
 	// healthProbeListener is used to serve liveness probe
 	healthProbeListener net.Listener
@@ -104,6 +104,12 @@ type controllerManager struct {
 
 	// Healthz probe handler
 	healthzHandler *healthz.Handler
+
+	// metricsHTTPHandler is the endpoint name for metrics.
+	metricsHTTPHandler *http.Handler
+
+	// webhookHTTPHandler is the endpoint name for metrics.
+	webhookHTTPHandler *http.Handler
 
 	// controllerConfig are the global controller options.
 	controllerConfig config.Controller
@@ -198,7 +204,7 @@ func (cm *controllerManager) AddMetricsExtraHandler(path string, handler http.Ha
 		return fmt.Errorf("can't register extra handler by duplicate path %q on metrics http server", path)
 	}
 
-	cm.metricsExtraHandlers[path] = handler
+	cm.metricsExtraHandlers[path] = &handler
 	cm.logger.V(2).Info("Registering metrics http server extra handler", "path", path)
 	return nil
 }
@@ -235,6 +241,18 @@ func (cm *controllerManager) AddReadyzCheck(name string, check healthz.Checker) 
 
 	cm.readyzHandler.Checks[name] = check
 	return nil
+}
+
+func (cm *controllerManager) GetExtraMetricsHTTPHandler(path string) *http.Handler {
+	return cm.metricsExtraHandlers[path]
+}
+
+func (cm *controllerManager) GetMetricsHTTPHandler() *http.Handler {
+	return cm.metricsHTTPHandler
+}
+
+func (cm *controllerManager) GetWebhookHTTPHandler() *http.Handler {
+	return cm.webhookHTTPHandler
 }
 
 func (cm *controllerManager) GetHTTPClient() *http.Client {
@@ -294,14 +312,16 @@ func (cm *controllerManager) GetControllerOptions() config.Controller {
 }
 
 func (cm *controllerManager) serveMetrics() {
-	handler := promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{
+	tmp := promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{
 		ErrorHandling: promhttp.HTTPErrorOnError,
 	})
+	cm.metricsHTTPHandler = &tmp
+
 	// TODO(JoelSpeed): Use existing Kubernetes machinery for serving metrics
 	mux := http.NewServeMux()
-	mux.Handle(defaultMetricsEndpoint, handler)
+	mux.Handle(defaultMetricsEndpoint, *cm.metricsHTTPHandler)
 	for path, extraHandler := range cm.metricsExtraHandlers {
-		mux.Handle(path, extraHandler)
+		mux.Handle(path, *extraHandler)
 	}
 
 	server := httpserver.New(mux)

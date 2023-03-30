@@ -77,11 +77,11 @@ type Server struct {
 	// TLSOpts is used to allow configuring the TLS config used for the server
 	TLSOpts []func(*tls.Config)
 
-	// WebhookMux is the multiplexer that handles different webhooks.
+	// WebhookMux is the multiplexer that handles different Webhooks.
 	WebhookMux *http.ServeMux
 
-	// webhooks keep track of all registered webhooks
-	webhooks map[string]http.Handler
+	// Webhooks keep track of all registered Webhooks
+	Webhooks map[string]*http.Handler
 
 	// defaultingOnce ensures that the default fields are only ever set once.
 	defaultingOnce sync.Once
@@ -96,7 +96,7 @@ type Server struct {
 
 // setDefaults does defaulting for the Server.
 func (s *Server) setDefaults() {
-	s.webhooks = map[string]http.Handler{}
+	s.Webhooks = map[string]*http.Handler{}
 	if s.WebhookMux == nil {
 		s.WebhookMux = http.NewServeMux()
 	}
@@ -131,10 +131,10 @@ func (s *Server) Register(path string, hook http.Handler) {
 	defer s.mu.Unlock()
 
 	s.defaultingOnce.Do(s.setDefaults)
-	if _, found := s.webhooks[path]; found {
+	if _, found := s.Webhooks[path]; found {
 		panic(fmt.Errorf("can't register duplicate path: %v", path))
 	}
-	s.webhooks[path] = hook
+	s.Webhooks[path] = &hook
 	s.WebhookMux.Handle(path, metrics.InstrumentedHook(path, hook))
 
 	regLog := log.WithValues("path", path)
@@ -166,7 +166,7 @@ func tlsVersion(version string) (uint16, error) {
 func (s *Server) Start(ctx context.Context) error {
 	s.defaultingOnce.Do(s.setDefaults)
 
-	baseHookLog := log.WithName("webhooks")
+	baseHookLog := log.WithName("Webhooks")
 	baseHookLog.Info("Starting webhook server")
 
 	certPath := filepath.Join(s.CertDir, s.CertName)
