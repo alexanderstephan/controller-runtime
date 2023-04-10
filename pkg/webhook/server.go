@@ -90,6 +90,9 @@ type Server struct {
 	// and thus can be used to check if the server has been started
 	started bool
 
+	// serve indicates whether the server should serve HTTP requests.
+	serve bool
+
 	// mu protects access to the webhook map & setFields for Start, Register, etc
 	mu sync.Mutex
 }
@@ -219,6 +222,10 @@ func (s *Server) Start(ctx context.Context) error {
 	listener, err := tls.Listen("tcp", net.JoinHostPort(s.Host, strconv.Itoa(s.Port)), cfg)
 	if err != nil {
 		return err
+	}
+
+	if !s.serve {
+		return nil
 	}
 
 	log.Info("Serving webhook server", "host", s.Host, "port", s.Port)

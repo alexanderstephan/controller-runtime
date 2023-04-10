@@ -345,6 +345,9 @@ type Options struct {
 	// +optional
 	Controller config.Controller
 
+	// ServeEndpoints is a flag to enable serving the /metrics, /healthz endpoints and webhooks.
+	ServeEndpoints bool
+
 	// makeBroadcaster allows deferring the creation of the broadcaster to
 	// avoid leaking goroutines if we never call Start on this manager.  It also
 	// returns whether or not this is a "owned" broadcaster, and as such should be

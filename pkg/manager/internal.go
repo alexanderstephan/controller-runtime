@@ -80,6 +80,9 @@ type controllerManager struct {
 	// resourceLock forms the basis for leader election
 	resourceLock resourcelock.Interface
 
+	// serveEndpoints enables the manager to serve the healthz, readyz and metrics endpoints.
+	serveEndpoints bool
+
 	// leaderElectionReleaseOnCancel defines if the manager should step back from the leader lease
 	// on shutdown
 	leaderElectionReleaseOnCancel bool
@@ -99,16 +102,16 @@ type controllerManager struct {
 	// Liveness probe endpoint name
 	livenessEndpointName string
 
-	// Readyz probe handler
+	// Readyz probe handler.
 	readyzHandler *healthz.Handler
 
-	// Healthz probe handler
+	// Healthz probe handler.
 	healthzHandler *healthz.Handler
 
 	// metricsHTTPHandler is the endpoint name for metrics.
 	metricsHTTPHandler *http.Handler
 
-	// webhookHTTPHandler is the endpoint name for metrics.
+	// webhookHTTPHandler is the handler for web hooks.
 	webhookHTTPHandler *http.Handler
 
 	// controllerConfig are the global controller options.
@@ -253,6 +256,14 @@ func (cm *controllerManager) GetMetricsHTTPHandler() *http.Handler {
 
 func (cm *controllerManager) GetWebhookHTTPHandler() *http.Handler {
 	return cm.webhookHTTPHandler
+}
+
+func (cm *controllerManager) GetHealthCheckHTTPHandler() *healthz.Handler {
+	return cm.healthzHandler
+}
+
+func (cm *controllerManager) GetReadyzHTTPHandler() *healthz.Handler {
+	return cm.readyzHandler
 }
 
 func (cm *controllerManager) GetHTTPClient() *http.Client {
@@ -431,16 +442,18 @@ func (cm *controllerManager) Start(ctx context.Context) (err error) {
 		return fmt.Errorf("failed to add cluster to runnables: %w", err)
 	}
 
-	// Metrics should be served whether the controller is leader or not.
-	// (If we don't serve metrics for non-leaders, prometheus will still scrape
-	// the pod but will get a connection refused).
-	if cm.metricsListener != nil {
-		cm.serveMetrics()
-	}
+	if cm.serveEndpoints {
+		// Metrics should be served whether the controller is leader or not.
+		// (If we don't serve metrics for non-leaders, prometheus will still scrape
+		// the pod but will get a connection refused).
+		if cm.metricsListener != nil {
+			cm.serveMetrics()
+		}
 
-	// Serve health probes.
-	if cm.healthProbeListener != nil {
-		cm.serveHealthProbes()
+		// Serve health probes.
+		if cm.healthProbeListener != nil {
+			cm.serveHealthProbes()
+		}
 	}
 
 	// First start any webhook servers, which includes conversion, validation, and defaulting
