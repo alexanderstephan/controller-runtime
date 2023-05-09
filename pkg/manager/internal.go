@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,7 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
@@ -114,6 +114,9 @@ type controllerManager struct {
 	// webhookHTTPHandler is the handler for web hooks.
 	webhookHTTPHandler *http.Handler
 
+	// pprofListener is used to serve pprof
+	pprofListener net.Listener
+
 	// controllerConfig are the global controller options.
 	controllerConfig config.Controller
 
@@ -135,7 +138,7 @@ type controllerManager struct {
 	// election was configured.
 	elected chan struct{}
 
-	webhookServer *webhook.Server
+	webhookServer webhook.Server
 	// webhookServerOnce will be called in GetWebhookServer() to optionally initialize
 	// webhookServer if unset, and Add() it to controllerManager.
 	webhookServerOnce sync.Once
@@ -302,7 +305,7 @@ func (cm *controllerManager) GetAPIReader() client.Reader {
 	return cm.cluster.GetAPIReader()
 }
 
-func (cm *controllerManager) GetWebhookServer() *webhook.Server {
+func (cm *controllerManager) GetWebhookServer() webhook.Server {
 	cm.webhookServerOnce.Do(func() {
 		if cm.webhookServer == nil {
 			panic("webhook should not be nil")
@@ -322,7 +325,10 @@ func (cm *controllerManager) GetControllerOptions() config.Controller {
 	return cm.controllerConfig
 }
 
-func (cm *controllerManager) serveMetrics() {
+func (cm *controllerManager) addMetricsServer() error {
+	mux := http.NewServeMux()
+	srv := httpserver.New(mux)
+
 	handler := promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{
 		ErrorHandling: promhttp.HTTPErrorOnError,
 	})
@@ -330,18 +336,22 @@ func (cm *controllerManager) serveMetrics() {
 
 	// TODO(JoelSpeed): Use existing Kubernetes machinery for serving metrics
 	mux := http.NewServeMux()
-	mux.Handle(defaultMetricsEndpoint, *cm.metricsHTTPHandler)
+	mux.Handle(defaultMetricsEndpoint, handler)
 	for path, extraHandler := range cm.metricsExtraHandlers {
 		mux.Handle(path, *extraHandler)
 	}
 
-	server := httpserver.New(mux)
-	go cm.httpServe("metrics", cm.logger.WithValues("path", defaultMetricsEndpoint), server, cm.metricsListener)
+	return cm.add(&server{
+		Kind:     "metrics",
+		Log:      cm.logger.WithValues("path", defaultMetricsEndpoint),
+		Server:   srv,
+		Listener: cm.metricsListener,
+	})
 }
 
-func (cm *controllerManager) serveHealthProbes() {
+func (cm *controllerManager) addHealthProbeServer() error {
 	mux := http.NewServeMux()
-	server := httpserver.New(mux)
+	srv := httpserver.New(mux)
 
 	if cm.readyzHandler != nil {
 		mux.Handle(cm.readinessEndpointName, http.StripPrefix(cm.readinessEndpointName, cm.readyzHandler))
@@ -354,43 +364,30 @@ func (cm *controllerManager) serveHealthProbes() {
 		mux.Handle(cm.livenessEndpointName+"/", http.StripPrefix(cm.livenessEndpointName, cm.healthzHandler))
 	}
 
-	go cm.httpServe("health probe", cm.logger, server, cm.healthProbeListener)
+	return cm.add(&server{
+		Kind:     "health probe",
+		Log:      cm.logger,
+		Server:   srv,
+		Listener: cm.healthProbeListener,
+	})
 }
 
-func (cm *controllerManager) httpServe(kind string, log logr.Logger, server *http.Server, ln net.Listener) {
-	log = log.WithValues("kind", kind, "addr", ln.Addr())
+func (cm *controllerManager) addPprofServer() error {
+	mux := http.NewServeMux()
+	srv := httpserver.New(mux)
 
-	go func() {
-		log.Info("Starting server")
-		if err := server.Serve(ln); err != nil {
-			if errors.Is(err, http.ErrServerClosed) {
-				return
-			}
-			if atomic.LoadInt64(cm.stopProcedureEngaged) > 0 {
-				// There might be cases where connections are still open and we try to shutdown
-				// but not having enough time to close the connection causes an error in Serve
-				//
-				// In that case we want to avoid returning an error to the main error channel.
-				log.Error(err, "error on Serve after stop has been engaged")
-				return
-			}
-			cm.errChan <- err
-		}
-	}()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
-	// Shutdown the server when stop is closed.
-	<-cm.internalProceduresStop
-	if err := server.Shutdown(cm.shutdownCtx); err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			// Avoid logging context related errors.
-			return
-		}
-		if atomic.LoadInt64(cm.stopProcedureEngaged) > 0 {
-			cm.logger.Error(err, "error on Shutdown after stop has been engaged")
-			return
-		}
-		cm.errChan <- err
-	}
+	return cm.add(&server{
+		Kind:     "pprof",
+		Log:      cm.logger,
+		Server:   srv,
+		Listener: cm.pprofListener,
+	})
 }
 
 // Start starts the manager and waits indefinitely.
@@ -456,6 +453,29 @@ func (cm *controllerManager) Start(ctx context.Context) (err error) {
 		}
 	}
 
+	// Metrics should be served whether the controller is leader or not.
+	// (If we don't serve metrics for non-leaders, prometheus will still scrape
+	// the pod but will get a connection refused).
+	if cm.metricsListener != nil {
+		if err := cm.addMetricsServer(); err != nil {
+			return fmt.Errorf("failed to add metrics server: %w", err)
+		}
+	}
+
+	// Serve health probes.
+	if cm.healthProbeListener != nil {
+		if err := cm.addHealthProbeServer(); err != nil {
+			return fmt.Errorf("failed to add health probe server: %w", err)
+		}
+	}
+
+	// Add pprof server
+	if cm.pprofListener != nil {
+		if err := cm.addPprofServer(); err != nil {
+			return fmt.Errorf("failed to add pprof server: %w", err)
+		}
+	}
+
 	// First start any webhook servers, which includes conversion, validation, and defaulting
 	// webhooks that are registered.
 	//
@@ -463,22 +483,22 @@ func (cm *controllerManager) Start(ctx context.Context) (err error) {
 	// between conversion webhooks and the cache sync (usually initial list) which causes the webhooks
 	// to never start because no cache can be populated.
 	if err := cm.runnables.Webhooks.Start(cm.internalCtx); err != nil {
-		if !errors.Is(err, wait.ErrWaitTimeout) {
-			return err
+		if err != nil {
+			return fmt.Errorf("failed to start webhooks: %w", err)
 		}
 	}
 
 	// Start and wait for caches.
 	if err := cm.runnables.Caches.Start(cm.internalCtx); err != nil {
-		if !errors.Is(err, wait.ErrWaitTimeout) {
-			return err
+		if err != nil {
+			return fmt.Errorf("failed to start caches: %w", err)
 		}
 	}
 
 	// Start the non-leaderelection Runnables after the cache has synced.
 	if err := cm.runnables.Others.Start(cm.internalCtx); err != nil {
-		if !errors.Is(err, wait.ErrWaitTimeout) {
-			return err
+		if err != nil {
+			return fmt.Errorf("failed to start other runnables: %w", err)
 		}
 	}
 

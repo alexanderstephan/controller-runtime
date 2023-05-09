@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The Kubernetes Authors.
+Copyright 2022 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,5 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package admissiontest contains fake webhooks for validating admission webhooks
-package admissiontest
+package interceptor
+
+import (
+	"testing"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+)
+
+func TestInterceptor(t *testing.T) {
+	RegisterFailHandler(Fail)
+	RunSpecs(t, "Fake client Suite")
+}
+
+var _ = BeforeSuite(func() {
+	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
+})

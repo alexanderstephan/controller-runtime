@@ -86,7 +86,7 @@ type Manager interface {
 	Start(ctx context.Context) error
 
 	// GetWebhookServer returns a webhook.Server
-	GetWebhookServer() *webhook.Server
+	GetWebhookServer() webhook.Server
 
 	// GetMetricsHTTPHandler returns a http.Handler that serves metrics.
 	GetMetricsHTTPHandler() *http.Handler
@@ -280,6 +280,13 @@ type Options struct {
 	// Liveness probe endpoint name, defaults to "healthz"
 	LivenessEndpointName string
 
+	// PprofBindAddress is the TCP address that the controller should bind to
+	// for serving pprof.
+	// It can be set to "" or "0" to disable the pprof serving.
+	// Since pprof may contain sensitive information, make sure to protect it
+	// before exposing it to public.
+	PprofBindAddress string
+
 	// Port is the port that the webhook server serves at.
 	// It is used to set webhook.Server.Port if WebhookServer is not set.
 	//
@@ -308,7 +315,7 @@ type Options struct {
 	// WebhookServer is an externally configured webhook.Server. By default,
 	// a Manager will create a default server using Port, Host, and CertDir;
 	// if this is set, the Manager will use this server instead.
-	WebhookServer *webhook.Server
+	WebhookServer webhook.Server
 
 	// BaseContext is the function that provides Context values to Runnables
 	// managed by the Manager. If a BaseContext function isn't provided, Runnables
@@ -359,6 +366,7 @@ type Options struct {
 	newResourceLock        func(config *rest.Config, recorderProvider recorder.Provider, options leaderelection.Options) (resourcelock.Interface, error)
 	newMetricsListener     func(addr string) (net.Listener, error)
 	newHealthProbeListener func(addr string) (net.Listener, error)
+	newPprofListener       func(addr string) (net.Listener, error)
 }
 
 // BaseContextFunc is a function used to provide a base Context to Runnables
@@ -470,6 +478,13 @@ func New(config *rest.Config, options Options) (Manager, error) {
 		return nil, err
 	}
 
+	// Create pprof listener. This will throw an error if the bind
+	// address is invalid or already in use.
+	pprofListener, err := options.newPprofListener(options.PprofBindAddress)
+	if err != nil {
+		return nil, fmt.Errorf("failed to new pprof listener: %w", err)
+	}
+
 	errChan := make(chan error)
 	runnables := newRunnables(options.BaseContext, errChan)
 
@@ -493,6 +508,7 @@ func New(config *rest.Config, options Options) (Manager, error) {
 		healthProbeListener:           healthProbeListener,
 		readinessEndpointName:         options.ReadinessEndpointName,
 		livenessEndpointName:          options.LivenessEndpointName,
+		pprofListener:                 pprofListener,
 		gracefulShutdownTimeout:       *options.GracefulShutdownTimeout,
 		internalProceduresStop:        make(chan struct{}),
 		leaderElectionStopped:         make(chan struct{}),
@@ -552,11 +568,11 @@ func (o Options) AndFrom(loader config.ControllerManagerConfiguration) (Options,
 		o.CertDir = newObj.Webhook.CertDir
 	}
 	if o.WebhookServer == nil {
-		o.WebhookServer = &webhook.Server{
+		o.WebhookServer = webhook.NewServer(webhook.Options{
 			Port:    o.Port,
 			Host:    o.Host,
 			CertDir: o.CertDir,
-		}
+		})
 	}
 
 	if newObj.Controller != nil {
@@ -638,6 +654,19 @@ func defaultHealthProbeListener(addr string) (net.Listener, error) {
 	return ln, nil
 }
 
+// defaultPprofListener creates the default pprof listener bound to the given address.
+func defaultPprofListener(addr string) (net.Listener, error) {
+	if addr == "" || addr == "0" {
+		return nil, nil
+	}
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("error listening on %s: %w", addr, err)
+	}
+	return ln, nil
+}
+
 // defaultBaseContext is used as the BaseContext value in Options if one
 // has not already been set.
 func defaultBaseContext() context.Context {
@@ -698,6 +727,10 @@ func setOptionsDefaults(options Options) Options {
 		options.newHealthProbeListener = defaultHealthProbeListener
 	}
 
+	if options.newPprofListener == nil {
+		options.newPprofListener = defaultPprofListener
+	}
+
 	if options.GracefulShutdownTimeout == nil {
 		gracefulShutdownTimeout := defaultGracefulShutdownPeriod
 		options.GracefulShutdownTimeout = &gracefulShutdownTimeout
@@ -712,12 +745,12 @@ func setOptionsDefaults(options Options) Options {
 	}
 
 	if options.WebhookServer == nil {
-		options.WebhookServer = &webhook.Server{
+		options.WebhookServer = webhook.NewServer(webhook.Options{
 			Host:    options.Host,
 			Port:    options.Port,
 			CertDir: options.CertDir,
 			TLSOpts: options.TLSOpts,
-		}
+		})
 	}
 
 	return options

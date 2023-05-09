@@ -46,7 +46,29 @@ var DefaultPort = 9443
 // at the default locations (tls.crt and tls.key). If you do not
 // want to configure TLS (i.e for testing purposes) run an
 // admission.StandaloneWebhook in your own server.
-type Server struct {
+type Server interface {
+	// NeedLeaderElection implements the LeaderElectionRunnable interface, which indicates
+	// the webhook server doesn't need leader election.
+	NeedLeaderElection() bool
+
+	// Register marks the given webhook as being served at the given path.
+	// It panics if two hooks are registered on the same path.
+	Register(path string, hook http.Handler)
+
+	// Start runs the server.
+	// It will install the webhook related resources depend on the server configuration.
+	Start(ctx context.Context) error
+
+	// StartedChecker returns an healthz.Checker which is healthy after the
+	// server has been started.
+	StartedChecker() healthz.Checker
+
+	// WebhookMux returns the servers WebhookMux
+	WebhookMux() *http.ServeMux
+}
+
+// Options are all the available options for a webhook.Server
+type Options struct {
 	// Host is the address that the server will listen on.
 	// Defaults to "" - all addresses.
 	Host string
@@ -60,9 +82,13 @@ type Server struct {
 	CertDir string
 
 	// CertName is the server certificate name. Defaults to tls.crt.
+	//
+	// Note: This option should only be set when TLSOpts does not override GetCertificate.
 	CertName string
 
 	// KeyName is the server key name. Defaults to tls.key.
+	//
+	// Note: This option should only be set when TLSOpts does not override GetCertificate.
 	KeyName string
 
 	// ClientCAName is the CA certificate name which server used to verify remote(client)'s certificate.
@@ -79,6 +105,18 @@ type Server struct {
 
 	// WebhookMux is the multiplexer that handles different webhooks.
 	WebhookMux *http.ServeMux
+}
+
+// NewServer constructs a new Server from the provided options.
+func NewServer(o Options) Server {
+	return &DefaultServer{
+		Options: o,
+	}
+}
+
+// DefaultServer is the default implementation used for Server.
+type DefaultServer struct {
+	Options Options
 
 	// Webhooks keep track of all registered webhooks.
 	Webhooks map[string]*http.Handler
@@ -95,41 +133,43 @@ type Server struct {
 
 	// mu protects access to the webhook map & setFields for Start, Register, etc
 	mu sync.Mutex
+
+	webhookMux *http.ServeMux
 }
 
 // setDefaults does defaulting for the Server.
-func (s *Server) setDefaults() {
+func (o *Options) setDefaults() {
 	s.Webhooks = map[string]*http.Handler{}
-	if s.WebhookMux == nil {
-		s.WebhookMux = http.NewServeMux()
+	if o.WebhookMux == nil {
+		o.WebhookMux = http.NewServeMux()
 	}
 
-	if s.Port <= 0 {
-		s.Port = DefaultPort
+	if o.Port <= 0 {
+		o.Port = DefaultPort
 	}
 
-	if len(s.CertDir) == 0 {
-		s.CertDir = filepath.Join(os.TempDir(), "k8s-webhook-server", "serving-certs")
+	if len(o.CertDir) == 0 {
+		o.CertDir = filepath.Join(os.TempDir(), "k8s-webhook-server", "serving-certs")
 	}
 
-	if len(s.CertName) == 0 {
-		s.CertName = "tls.crt"
+	if len(o.CertName) == 0 {
+		o.CertName = "tls.crt"
 	}
 
-	if len(s.KeyName) == 0 {
-		s.KeyName = "tls.key"
+	if len(o.KeyName) == 0 {
+		o.KeyName = "tls.key"
 	}
 }
 
 // NeedLeaderElection implements the LeaderElectionRunnable interface, which indicates
 // the webhook server doesn't need leader election.
-func (*Server) NeedLeaderElection() bool {
+func (*DefaultServer) NeedLeaderElection() bool {
 	return false
 }
 
 // Register marks the given webhook as being served at the given path.
 // It panics if two hooks are registered on the same path.
-func (s *Server) Register(path string, hook http.Handler) {
+func (s *DefaultServer) Register(path string, hook http.Handler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -166,41 +206,49 @@ func tlsVersion(version string) (uint16, error) {
 
 // Start runs the server.
 // It will install the webhook related resources depend on the server configuration.
-func (s *Server) Start(ctx context.Context) error {
+func (s *DefaultServer) Start(ctx context.Context) error {
 	s.defaultingOnce.Do(s.setDefaults)
 
 	baseHookLog := log.WithName("webhooks")
 	baseHookLog.Info("Starting webhook server")
 
-	certPath := filepath.Join(s.CertDir, s.CertName)
-	keyPath := filepath.Join(s.CertDir, s.KeyName)
-
-	certWatcher, err := certwatcher.New(certPath, keyPath)
-	if err != nil {
-		return err
-	}
-
-	go func() {
-		if err := certWatcher.Start(ctx); err != nil {
-			log.Error(err, "certificate watcher error")
-		}
-	}()
-
-	tlsMinVersion, err := tlsVersion(s.TLSMinVersion)
+	tlsMinVersion, err := tlsVersion(s.Options.TLSMinVersion)
 	if err != nil {
 		return err
 	}
 
 	cfg := &tls.Config{ //nolint:gosec
-		NextProtos:     []string{"h2"},
-		GetCertificate: certWatcher.GetCertificate,
-		MinVersion:     tlsMinVersion,
+		NextProtos: []string{"h2"},
+		MinVersion: tlsMinVersion,
+	}
+	// fallback TLS config ready, will now mutate if passer wants full control over it
+	for _, op := range s.Options.TLSOpts {
+		op(cfg)
 	}
 
-	// load CA to verify client certificate
-	if s.ClientCAName != "" {
+	if cfg.GetCertificate == nil {
+		certPath := filepath.Join(s.Options.CertDir, s.Options.CertName)
+		keyPath := filepath.Join(s.Options.CertDir, s.Options.KeyName)
+
+		// Create the certificate watcher and
+		// set the config's GetCertificate on the TLSConfig
+		certWatcher, err := certwatcher.New(certPath, keyPath)
+		if err != nil {
+			return err
+		}
+		cfg.GetCertificate = certWatcher.GetCertificate
+
+		go func() {
+			if err := certWatcher.Start(ctx); err != nil {
+				log.Error(err, "certificate watcher error")
+			}
+		}()
+	}
+
+	// Load CA to verify client certificate, if configured.
+	if s.Options.ClientCAName != "" {
 		certPool := x509.NewCertPool()
-		clientCABytes, err := os.ReadFile(filepath.Join(s.CertDir, s.ClientCAName))
+		clientCABytes, err := os.ReadFile(filepath.Join(s.Options.CertDir, s.Options.ClientCAName))
 		if err != nil {
 			return fmt.Errorf("failed to read client CA cert: %w", err)
 		}
@@ -214,12 +262,7 @@ func (s *Server) Start(ctx context.Context) error {
 		cfg.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 
-	// fallback TLS config ready, will now mutate if passer wants full control over it
-	for _, op := range s.TLSOpts {
-		op(cfg)
-	}
-
-	listener, err := tls.Listen("tcp", net.JoinHostPort(s.Host, strconv.Itoa(s.Port)), cfg)
+	listener, err := tls.Listen("tcp", net.JoinHostPort(s.Options.Host, strconv.Itoa(s.Options.Port)), cfg)
 	if err != nil {
 		return err
 	}
@@ -228,9 +271,9 @@ func (s *Server) Start(ctx context.Context) error {
 		return nil
 	}
 
-	log.Info("Serving webhook server", "host", s.Host, "port", s.Port)
+	log.Info("Serving webhook server", "host", s.Options.Host, "port", s.Options.Port)
 
-	srv := httpserver.New(s.WebhookMux)
+	srv := httpserver.New(s.webhookMux)
 
 	idleConnsClosed := make(chan struct{})
 	go func() {
@@ -259,7 +302,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 // StartedChecker returns an healthz.Checker which is healthy after the
 // server has been started.
-func (s *Server) StartedChecker() healthz.Checker {
+func (s *DefaultServer) StartedChecker() healthz.Checker {
 	config := &tls.Config{
 		InsecureSkipVerify: true, //nolint:gosec // config is used to connect to our own webhook port.
 	}
@@ -272,7 +315,7 @@ func (s *Server) StartedChecker() healthz.Checker {
 		}
 
 		d := &net.Dialer{Timeout: 10 * time.Second}
-		conn, err := tls.DialWithDialer(d, "tcp", net.JoinHostPort(s.Host, strconv.Itoa(s.Port)), config)
+		conn, err := tls.DialWithDialer(d, "tcp", net.JoinHostPort(s.Options.Host, strconv.Itoa(s.Options.Port)), config)
 		if err != nil {
 			return fmt.Errorf("webhook server is not reachable: %w", err)
 		}
@@ -283,4 +326,9 @@ func (s *Server) StartedChecker() healthz.Checker {
 
 		return nil
 	}
+}
+
+// WebhookMux returns the servers WebhookMux
+func (s *DefaultServer) WebhookMux() *http.ServeMux {
+	return s.webhookMux
 }

@@ -97,10 +97,11 @@ var _ = Describe("Webhook", func() {
 		})
 		It("should reject create request for multi-webhook that rejects all requests", func() {
 			m, err := manager.New(cfg, manager.Options{
-				Port:    testenv.WebhookInstallOptions.LocalServingPort,
-				Host:    testenv.WebhookInstallOptions.LocalServingHost,
-				CertDir: testenv.WebhookInstallOptions.LocalServingCertDir,
-				TLSOpts: []func(*tls.Config){func(config *tls.Config) {}},
+				MetricsBindAddress: "0",
+				Port:               testenv.WebhookInstallOptions.LocalServingPort,
+				Host:               testenv.WebhookInstallOptions.LocalServingHost,
+				CertDir:            testenv.WebhookInstallOptions.LocalServingCertDir,
+				TLSOpts:            []func(*tls.Config){func(config *tls.Config) {}},
 			}) // we need manager here just to leverage manager.SetFields
 			Expect(err).NotTo(HaveOccurred())
 			server := m.GetWebhookServer()
@@ -122,11 +123,11 @@ var _ = Describe("Webhook", func() {
 	})
 	Context("when running a webhook server without a manager", func() {
 		It("should reject create request for webhook that rejects all requests", func() {
-			server := webhook.Server{
+			server := webhook.NewServer(webhook.Options{
 				Port:    testenv.WebhookInstallOptions.LocalServingPort,
 				Host:    testenv.WebhookInstallOptions.LocalServingHost,
 				CertDir: testenv.WebhookInstallOptions.LocalServingCertDir,
-			}
+			})
 			server.Register("/failing", &webhook.Admission{Handler: &rejectingValidator{d: admission.NewDecoder(testenv.Scheme)}})
 
 			ctx, cancel := context.WithCancel(context.Background())
